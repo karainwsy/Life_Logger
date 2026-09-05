@@ -1,0 +1,32 @@
+node_modules/
+apps/desktop/dist/
+apps/desktop/dist-electron/
+.test-artifacts/
+*.log
+*.db
+*.db-wal
+*.db-shm
+
+# Local configuration, credentials and captured data
+.claude/
+.codex/
+.agents/
+.env
+.env.*
+!.env.example
+*.local.*
+*.pem
+*.key
+*.wav
+*.pcm
+whisper-models/
+*.bin
+coverage/
+.DS_Store
+Thumbs.db
+
+# Superseded local previews and debugging helpers
+app-preview.png
+apps/desktop/electron-debug.js
+apps/desktop/electron-subpath-debug.js
+apps/desktop/scripts/capture-preview.cjs

@@ -1,0 +1,27 @@
+{
+  "name": "life-logger",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "npm run dev -w @life-logger/desktop",
+    "build": "npm run build -w @life-logger/desktop",
+    "typecheck": "npm run typecheck -w @life-logger/desktop",
+    "test": "npm run test -w @life-logger/desktop",
+    "start": "npm run start -w @life-logger/desktop",
+    "test:desktop": "npm run test:desktop -w @life-logger/desktop",
+    "rebuild:native": "node apps/desktop/scripts/rebuild-native.cjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.9.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13"
+  }
+}

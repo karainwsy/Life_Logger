@@ -1,0 +1,38 @@
+{
+  "name": "@life-logger/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "main": "dist-electron/main.cjs",
+  "scripts": {
+    "dev": "concurrently -k -n \"main,vite,electron\" \"node scripts/build-electron.cjs --watch\" \"vite\" \"wait-on tcp:5173 file:dist-electron/main.cjs && node scripts/launch-electron.cjs --dev\"",
+    "build": "node scripts/build-electron.cjs && vite build",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.electron.json",
+    "test": "vitest run",
+    "start": "node scripts/launch-electron.cjs",
+    "test:desktop": "node scripts/run-smoke.cjs"
+  },
+  "dependencies": {
+    "@kutalia/whisper-node-addon": "^1.1.0",
+    "@life-logger/ai": "0.1.0",
+    "@life-logger/capture": "0.1.0",
+    "@life-logger/domain": "0.1.0",
+    "@life-logger/shared": "0.1.0",
+    "@life-logger/storage": "0.1.0",
+    "@life-logger/sync": "0.1.0",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/react": "^19.1.2",
+    "@types/react-dom": "^19.1.2",
+    "@vitejs/plugin-react": "^5.0.0",
+    "concurrently": "^9.1.2",
+    "electron": "^36.0.0",
+    "typescript": "^5.8.3",
+    "vite": "^6.3.5",
+    "vitest": "^3.1.4",
+    "wait-on": "^8.0.3",
+    "esbuild": "^0.25.12"
+  }
+}
