@@ -6,6 +6,17 @@ import { createLogRepository } from '@life-logger/storage';
 import { captureBrowserVisits } from '@life-logger/capture';
 import { localDateKey, dateKeyRange } from '@life-logger/shared';
 
+export const readSmokeBrowserVisits = (input: { start: string; end: string; excludedProcesses: string[] }, folder: string) =>
+  captureBrowserVisits(input, { homeDir: path.join(folder, 'synthetic-home'), platform: 'win32' });
+
+export function addSmokeBrowserVisit(folder: string) {
+  const history = new Database(path.join(folder, 'synthetic-home/AppData/Local/Google/Chrome/User Data/Default/History'));
+  try {
+    history.prepare('INSERT INTO urls VALUES (?, ?, ?)').run(4, 'https://example.com/automation?token=private#secret', '自动补充测试：本地整理说明');
+    history.prepare('INSERT INTO visits VALUES (?, ?, ?)').run(6, 4, (Date.now() + 11_644_473_600_000) * 1000);
+  } finally { history.close(); }
+}
+
 export async function testAndSeedClues(dbPath: string, folder: string) {
   const date = localDateKey(new Date());
   const at = (hour: number, minute = 0) => { const value = new Date(dateKeyRange(date).start); value.setHours(hour, minute, 0, 0); return value.toISOString(); };
@@ -68,6 +79,26 @@ export async function testAndSeedClues(dbPath: string, folder: string) {
   const firstPage = repo.searchClues({ date }); const nextPage = repo.searchClues({ date, offset: 30 });
   assert.equal(firstPage.total, 39); assert.equal(firstPage.clues.length, 30); assert.equal(nextPage.clues.length, 9);
   assert.equal(new Set([...firstPage.clues, ...nextPage.clues].map(row => row.id)).size, 39);
+  const review = repo.getDailyReview({ date });
+  assert.equal(review.clueCount, 39, 'daily review reads beyond the first page');
+  assert.equal(review.visitCount, 38);
+  assert.equal(review.groups.length, 3);
+  const reviewInput = { date, content: `# ${date} · 一天回顾\n\n我的备注：准备复核。` };
+  const reviewLog = repo.saveDailyReview(reviewInput);
+  assert.equal(repo.saveDailyReview(reviewInput).id, reviewLog.id, 'saving is idempotent');
+  const revised = repo.saveDailyReview({ ...reviewInput, content: reviewInput.content + '\n复核已完成。' });
+  assert.notEqual(revised.id, reviewLog.id, 'revisions create snapshots');
+  repo.updateLog({ id: reviewLog.id, content: '用户直接修改了日志' });
+  const afterEdit = repo.saveDailyReview(reviewInput);
+  assert.notEqual(afterEdit.id, reviewLog.id, 'never overwrite direct edits');
+  repo.deleteLog({ id: afterEdit.id });
+  assert.notEqual(repo.saveDailyReview(reviewInput).id, afterEdit.id, 'deleted snapshots can be recreated');
+  assert.throws(() => repo.saveDailyReview({ date, content: ' ' }));
+  assert.throws(() => repo.saveDailyReview({ date, content: 'x'.repeat(100001) }));
+  repo.replaceAllLogs([]);
+  assert.equal(repo.getAllLogs().length, 0);
+  repo.saveDailyReview(reviewInput);
+  assert.equal(repo.getAllLogs().length, 1, 'restore clears stale review associations');
   repo.pruneActivitySessions(range.end);
   assert.equal(repo.searchClues({ date }).total, 1, 'retention preserves personal annotations');
   repo.close(); repo = createLogRepository(testPath);

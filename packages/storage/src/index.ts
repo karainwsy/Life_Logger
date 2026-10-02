@@ -298,6 +298,7 @@ export const createLogRepository = (dbFilePath: string, onChanged: () => void = 
       if (!Number.isSafeInteger(input?.id)) throw new Error('日志编号无效');
       const result = deleteStatement.run(input.id);
       if (result.changes) db.prepare('UPDATE activity_clues SET saved_log_id = NULL WHERE saved_log_id = ?').run(input.id);
+      if (result.changes) db.prepare('DELETE FROM daily_review_saves WHERE log_id = ?').run(input.id);
       if (result.changes) onChanged();
       return result.changes > 0;
     },
@@ -307,6 +308,7 @@ export const createLogRepository = (dbFilePath: string, onChanged: () => void = 
         (items: Array<{ content: string; createdAt: string; sourceType: LogSourceType }>) => {
         deleteAllStatement.run();
         db.prepare('UPDATE activity_clues SET saved_log_id = NULL').run();
+        db.prepare('DELETE FROM daily_review_saves').run();
 
         for (const item of items) {
           const content = item.content.trim();

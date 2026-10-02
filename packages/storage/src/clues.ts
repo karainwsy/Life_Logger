@@ -1,8 +1,12 @@
 import type Database from 'better-sqlite3';
+import { createHash } from 'node:crypto';
+import type { DailyReview, SaveDailyReviewInput } from '@life-logger/domain';
 import type { ActivityClue, ActivitySession, BrowserVisit, LogEntry, SearchCluesInput, SearchCluesResult, UpdateClueInput } from '@life-logger/domain';
-import { dateKeyRange, sanitizeClueUrl } from '@life-logger/shared';
+import { buildDailyReview, dateKeyRange, sanitizeClueUrl } from '@life-logger/shared';
 
 export type ClueRepository = {
+  getDailyReview(input: { date: string }): DailyReview;
+  saveDailyReview(input: SaveDailyReviewInput): LogEntry;
   searchClues(input: SearchCluesInput): SearchCluesResult;
   updateClue(input: UpdateClueInput): ActivityClue;
   importBrowserVisits(visits: BrowserVisit[]): number;
@@ -23,6 +27,7 @@ export function createClueRepository(db: Database.Database, onChanged: () => voi
     saved_log_id INTEGER
   );
   CREATE INDEX IF NOT EXISTS idx_clues_time ON activity_clues(started_at);
+  CREATE TABLE IF NOT EXISTS daily_review_saves (date TEXT NOT NULL, content_hash TEXT NOT NULL, log_id INTEGER NOT NULL, PRIMARY KEY (date, content_hash));
   INSERT OR IGNORE INTO activity_clues (source_key, kind, title, process_name, started_at, ended_at, duration_seconds)
   SELECT 'window:' || id, 'window', window_title, process_name, started_at, ended_at, duration_seconds FROM activity_sessions;`);
   const get = (id: number) => {
@@ -38,6 +43,31 @@ export function createClueRepository(db: Database.Database, onChanged: () => voi
       .run(`window:${session.id}`, session.windowTitle, session.processName, session.startedAt, session.endedAt, session.durationSeconds);
   };
   const repository: ClueRepository = {
+    getDailyReview(input) {
+      const range = dateKeyRange(input?.date);
+      const rows = db.prepare(`SELECT ${columns} FROM activity_clues WHERE dismissed = 0 AND started_at < ? AND (ended_at > ? OR started_at >= ?)`)
+        .all(range.end, range.start, range.start) as ActivityClue[];
+      return buildDailyReview(input.date, rows.map(map));
+    },
+    saveDailyReview(input) {
+      dateKeyRange(input?.date);
+      if (typeof input.content !== 'string' || !input.content.trim() || input.content.length > 100_000) throw new Error('回顾内容不能为空，且不能超过 10 万字');
+      const content = input.content.trim();
+      const hash = createHash('sha256').update(content).digest('hex');
+      const result = db.transaction(() => {
+        const saved = db.prepare(`SELECT logs.id, logs.content, logs.created_at AS createdAt, logs.source_type AS sourceType
+          FROM daily_review_saves INNER JOIN logs ON logs.id = daily_review_saves.log_id WHERE date = ? AND content_hash = ?`).get(input.date, hash) as LogEntry | undefined;
+        if (saved && saved.content === content) return saved;
+        const createdAt = new Date().toISOString();
+        const insert = db.prepare("INSERT INTO logs (content, created_at, source_type) VALUES (?, ?, 'activity_summary')").run(content, createdAt);
+        const id = Number(insert.lastInsertRowid);
+        db.prepare(`INSERT INTO daily_review_saves (date, content_hash, log_id) VALUES (?, ?, ?)
+          ON CONFLICT(date, content_hash) DO UPDATE SET log_id = excluded.log_id`).run(input.date, hash, id);
+        return { id, content, createdAt, sourceType: 'activity_summary' as const };
+      })();
+      onChanged();
+      return result;
+    },
     searchClues(input) {
       const range = dateKeyRange(input?.date);
       const conditions = ['started_at < ?', '(ended_at > ? OR started_at >= ?)', 'dismissed = ?'];

@@ -27,6 +27,7 @@ export default function App() {
   const [toast, setToast] = useState<{ text: string; kind: 'success' | 'error' } | null>(null);
   const notify: Notify = useCallback((text, kind = 'success') => setToast({ text, kind }), []);
   const refresh = useCallback(() => setRevision(value => value + 1), []);
+  useEffect(() => { window.scrollTo({ top: 0, left: 0 }); }, [page]);
   useEffect(() => { const timer = setTimeout(() => { setSearch(query.trim()); setOffset(0); }, 250); return () => clearTimeout(timer); }, [query]);
   useEffect(() => {
     const token = ++request.current; setLoading(true);
@@ -50,9 +51,9 @@ export default function App() {
   const onSaved = () => { resetFilters(); refresh(); };
   const pageTitle = titles[page];
   return <div className="app-shell">
-    <aside className="sidebar"><a className="brand" href="#" onClick={event => { event.preventDefault(); setPage('journal'); }}><span className="brand-symbol"><Icon name="book" size={25} /></span><span>Life Logger<small>日常记录</small></span></a>
-      <div className="workspace-label">个人空间<span>01</span></div>
-      <nav aria-label="主导航">{navigation.map(item => <button key={item.id} className={`nav-item ${page === item.id ? 'active' : ''}`} onClick={() => setPage(item.id)} aria-current={page === item.id ? 'page' : undefined}><Icon name={item.icon} size={20} /><span>{item.label}</span>{page === item.id && <span className="nav-dot" />}</button>)}</nav>
+    <aside className="sidebar"><a className="brand" href="#" aria-label="Life Logger · 我的日志" onClick={event => { event.preventDefault(); setPage('journal'); }}><span className="brand-symbol"><Icon name="book" size={25} /></span><span>Life Logger<small>日常记录</small></span></a>
+      <div className="workspace-label">我的空间</div>
+      <nav aria-label="主导航">{navigation.map(item => <div key={item.id}>{item.id === 'activity' && <div className="nav-section-label">记录工具</div>}<button className={`nav-item ${page === item.id ? 'active' : ''}`} onClick={() => setPage(item.id)} aria-label={item.label} title={item.label} aria-current={page === item.id ? 'page' : undefined}><Icon name={item.icon} size={20} /><span>{item.label}</span>{page === item.id && <span className="nav-dot" />}</button></div>)}</nav>
       <div className="sidebar-spacer" /><div className="sidebar-note"><span className="sidebar-note-line" /><p>日子一页页过去，<br />记录让它们有迹可循。</p></div>
       <div className="sidebar-bottom"><span className="avatar">L</span><div><strong>本地空间</strong><small><span className="status-dot" />离线可用</small></div><Icon name="shield" size={17} /></div>
     </aside>

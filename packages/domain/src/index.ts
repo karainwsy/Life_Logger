@@ -162,6 +162,16 @@ export type ActivitySettings = {
   captureWindowTitles: boolean;
   excludedProcesses?: string[];
   retentionDays?: number;
+  autoBrowserClues?: boolean;
+};
+
+export type ClueAutomationStatus = {
+  syncing: boolean;
+  lastSyncAt: string | null;
+  added: number;
+  warnings: string[];
+  error: string | null;
+  reviewError: string | null;
 };
 
 export type ActivityRange = {
@@ -192,6 +202,29 @@ export type BrowserVisit = { key: string; title: string; url: string; browser: s
 export type BrowserVisitsResult = { visits: BrowserVisit[]; sources: BrowserHistorySource[]; warnings: string[]; truncated: boolean };
 export type ImportBrowserCluesResult = { added: number; scanned: number; warnings: string[]; truncated: boolean };
 
+export type DailyReviewGroup = {
+  key: string;
+  kind: ActivityClue['kind'];
+  title: string;
+  label: string;
+  source: string;
+  url: string;
+  firstAt: string;
+  lastAt: string;
+  count: number;
+  activeSeconds: number;
+  notes: string[];
+};
+export type DailyReview = {
+  date: string;
+  clueCount: number;
+  windowCount: number;
+  visitCount: number;
+  activeSeconds: number;
+  groups: DailyReviewGroup[];
+};
+export type SaveDailyReviewInput = { date: string; content: string };
+
 export type GenerateActivitySummaryInput = {
   start?: string;
   end?: string;
@@ -213,6 +246,7 @@ export type LifeLoggerApi = {
   exportBackup(): Promise<ExportBackupResult | null>;
   importBackup(): Promise<ImportBackupResult | null>;
   getActivitySettings(): Promise<ActivitySettings>;
+  getClueAutomationStatus(): Promise<ClueAutomationStatus>;
   updateActivitySettings(input: ActivitySettings): Promise<ActivitySettings>;
   getRecentActivitySessions(limit?: number): Promise<ActivitySession[]>;
   generateActivitySummary(input?: GenerateActivitySummaryInput): Promise<ActivitySummary>;
@@ -221,4 +255,7 @@ export type LifeLoggerApi = {
   updateClue(input: UpdateClueInput): Promise<ActivityClue>;
   saveClueAsLog(input: { id: number }): Promise<LogEntry>;
   importBrowserClues(input: { date: string }): Promise<ImportBrowserCluesResult>;
+  getDailyReview(input: { date: string }): Promise<DailyReview>;
+  saveDailyReview(input: SaveDailyReviewInput): Promise<LogEntry>;
+  exportDailyReview(input: SaveDailyReviewInput): Promise<{ filePath: string } | null>;
 };

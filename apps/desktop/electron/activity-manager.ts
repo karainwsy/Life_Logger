@@ -2,8 +2,8 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { captureForegroundWindow } from '@life-logger/capture';
 import { generateActivitySummary } from '@life-logger/ai';
-import { localDateKey, startOfDayIso } from '@life-logger/shared';
-import type { ActivitySession, ActivitySettings, ActivitySummary, GenerateActivitySummaryInput } from '@life-logger/domain';
+import { composeDailyReview, localDateKey, startOfDayIso } from '@life-logger/shared';
+import type { ActivitySession, ActivitySettings, ActivitySummary, BrowserVisitsResult, ClueAutomationStatus, GenerateActivitySummaryInput } from '@life-logger/domain';
 import type { LogRepository } from '@life-logger/storage';
 
 type Dependencies = {
@@ -12,6 +12,7 @@ type Dependencies = {
   getIdleSeconds?: () => number;
   applyLoginItem?: (settings: ActivitySettings) => void;
   capture?: typeof captureForegroundWindow;
+  readBrowserClues: (date: string, excludedProcesses: string[]) => Promise<BrowserVisitsResult | null>;
 };
 type State = { settings: ActivitySettings; lastAutoSummaryAt: string | null; lastNightlyDate: string | null };
 export type ActivityManager = {
@@ -20,6 +21,7 @@ export type ActivityManager = {
   pause(): void;
   resume(): void;
   getSettings(): ActivitySettings;
+  getClueAutomationStatus(): ClueAutomationStatus;
   updateSettings(input: ActivitySettings): Promise<ActivitySettings>;
   getRecentSessions(limit?: number): ActivitySession[];
   generateSummary(input?: GenerateActivitySummaryInput): Promise<ActivitySummary>;
@@ -29,12 +31,13 @@ export type ActivityManager = {
 export const DEFAULT_SETTINGS: ActivitySettings = {
   enabled: false, pollIntervalSeconds: 60, periodicSummaryMinutes: 30,
   nightlySummaryTime: '22:00', openAtLogin: false, startMinimized: true,
-  captureWindowTitles: true, excludedProcesses: [], retentionDays: 0
+  captureWindowTitles: true, excludedProcesses: [], retentionDays: 0, autoBrowserClues: false
 };
 const integer = (value: unknown, min: number, max: number, fallback: number) =>
   typeof value === 'number' && Number.isFinite(value) ? Math.min(max, Math.max(min, Math.round(value))) : fallback;
 export const normalizeSettings = (input: Partial<ActivitySettings>): ActivitySettings => ({
   enabled: input.enabled === true,
+  autoBrowserClues: input.autoBrowserClues === true,
   pollIntervalSeconds: integer(input.pollIntervalSeconds, 10, 600, 60),
   periodicSummaryMinutes: integer(input.periodicSummaryMinutes, 0, 1440, 30),
   nightlySummaryTime: input.nightlySummaryTime === '' ? '' :
@@ -45,7 +48,7 @@ export const normalizeSettings = (input: Partial<ActivitySettings>): ActivitySet
   retentionDays: input.retentionDays && input.retentionDays > 0 ? integer(input.retentionDays, 7, 3650, 0) : 0
 });
 
-export const createActivityManager = ({ repository, stateFilePath, getIdleSeconds = () => 0, applyLoginItem = () => {}, capture = captureForegroundWindow }: Dependencies): ActivityManager => {
+export const createActivityManager = ({ repository, stateFilePath, getIdleSeconds = () => 0, applyLoginItem = () => {}, capture = captureForegroundWindow, readBrowserClues }: Dependencies): ActivityManager => {
   let state: State = { settings: { ...DEFAULT_SETTINGS }, lastAutoSummaryAt: null, lastNightlyDate: null };
   let current: { id: number; key: string; start: number; lastSeen: number } | null = null;
   let timers: NodeJS.Timeout[] = [];
@@ -54,6 +57,11 @@ export const createActivityManager = ({ repository, stateFilePath, getIdleSecond
   let generation = 0;
   let changesPending = 0;
   let lastPrunedDate = '';
+  let nextBrowserSyncAt = 0;
+  let lastBrowserAttemptAt = 0;
+  let browserSyncDate = '';
+  let browserWaiting = false;
+  const clueStatus: ClueAutomationStatus = { syncing: false, lastSyncAt: null, added: 0, warnings: [], error: null, reviewError: null };
   let queue: Promise<unknown> = Promise.resolve();
   const serial = <T>(task: () => Promise<T> | T): Promise<T> => {
     const next = queue.then(task);
@@ -74,7 +82,7 @@ export const createActivityManager = ({ repository, stateFilePath, getIdleSecond
   };
   const close = (at = Date.now()) => { writeCurrent(at); current = null; };
   const clearTimers = () => { timers.forEach(clearInterval); timers = []; };
-  const pause = () => { paused = true; generation += 1; close(); };
+  const pause = () => { paused = true; generation += 1; if (clueStatus.syncing) nextBrowserSyncAt = 0; close(); };
   const poll = async () => {
     if (!running || paused || changesPending > 0 || !state.settings.enabled) return;
     if (getIdleSeconds() >= 300) { close(current?.lastSeen); return; }
@@ -105,21 +113,58 @@ export const createActivityManager = ({ repository, stateFilePath, getIdleSecond
     return summary;
   };
   const checkScheduled = async () => {
-    if (!running || paused || !state.settings.enabled) return;
+    if (!running || paused || changesPending > 0 || (!state.settings.enabled && !state.settings.autoBrowserClues)) return;
     const now = new Date(); const end = now.toISOString(); const today = localDateKey(now);
+    let nightlyDueAt: number | null = null;
+    if (state.settings.nightlySummaryTime && state.lastNightlyDate !== today) {
+      const [hours, minutes] = state.settings.nightlySummaryTime.split(':').map(Number);
+      const due = new Date(now); due.setHours(hours, minutes, 0, 0); nightlyDueAt = due.getTime();
+    }
+    const nightlyNeedsSync = nightlyDueAt !== null && now.getTime() >= nightlyDueAt && lastBrowserAttemptAt < nightlyDueAt && !browserWaiting;
+    if (state.settings.autoBrowserClues && !clueStatus.syncing && (browserSyncDate !== today || now.getTime() >= nextBrowserSyncAt || nightlyNeedsSync)) {
+      const token = generation;
+      const attemptedAt = now.getTime();
+      browserSyncDate = today; clueStatus.syncing = true;
+      const active = () => token === generation && running && !paused && changesPending === 0 && state.settings.autoBrowserClues;
+      // The browser worker stays outside the sampling queue, so slow history reads cannot delay window recording.
+      background(async () => {
+        try {
+          const result = await readBrowserClues(today, [...(state.settings.excludedProcesses ?? [])]);
+          if (!active()) return;
+          if (!result) { browserWaiting = true; nextBrowserSyncAt = Date.now() + 60_000; return; }
+          lastBrowserAttemptAt = attemptedAt;
+          browserWaiting = false;
+          clueStatus.added = repository.importBrowserVisits(result.visits);
+          clueStatus.lastSyncAt = new Date().toISOString(); clueStatus.warnings = [...result.warnings]; clueStatus.error = null;
+          nextBrowserSyncAt = Date.now() + 15 * 60_000;
+        } catch (error) {
+          if (!active()) return;
+          lastBrowserAttemptAt = attemptedAt;
+          browserWaiting = false;
+          clueStatus.error = error instanceof Error ? error.message : '网页线索自动读取失败';
+          nextBrowserSyncAt = Date.now() + 15 * 60_000;
+        } finally {
+          clueStatus.syncing = false;
+          if (running && !paused && changesPending === 0) background(() => serial(checkScheduled));
+        }
+      });
+    }
     let changed = false;
     if (!state.lastAutoSummaryAt) { state.lastAutoSummaryAt = end; changed = true; }
-    if (state.settings.periodicSummaryMinutes > 0 && now.getTime() - Date.parse(state.lastAutoSummaryAt!) >= state.settings.periodicSummaryMinutes * 60_000) {
+    if (state.settings.enabled && state.settings.periodicSummaryMinutes > 0 && now.getTime() - Date.parse(state.lastAutoSummaryAt!) >= state.settings.periodicSummaryMinutes * 60_000) {
       summarize(state.lastAutoSummaryAt!, end, true);
       state.lastAutoSummaryAt = end; changed = true;
     }
-    if (state.settings.nightlySummaryTime && state.lastNightlyDate !== today) {
-      const [hours, minutes] = state.settings.nightlySummaryTime.split(':').map(Number);
-      const due = new Date(now); due.setHours(hours, minutes, 0, 0);
-      if (now >= due) {
-        summarize(startOfDayIso(now), end, true);
-        state.lastNightlyDate = today; changed = true;
-      }
+    if (nightlyDueAt !== null && now.getTime() >= nightlyDueAt && (!state.settings.autoBrowserClues || (!clueStatus.syncing && !browserWaiting))) {
+      try {
+        if (state.settings.enabled && getIdleSeconds() < 300) writeCurrent(now.getTime());
+        const review = repository.getDailyReview({ date: today });
+        if (review.groups.length) {
+          repository.saveDailyReview({ date: today, content: composeDailyReview(review, review.groups.map(group => group.key)) });
+          state.lastNightlyDate = today; changed = true;
+        }
+        clueStatus.reviewError = null;
+      } catch (error) { clueStatus.reviewError = error instanceof Error ? error.message : '每日回顾自动生成失败'; }
     }
     if (lastPrunedDate !== today) {
       if (state.settings.retentionDays && state.settings.retentionDays > 0) {
@@ -131,7 +176,7 @@ export const createActivityManager = ({ repository, stateFilePath, getIdleSecond
   };
   const arm = () => {
     clearTimers();
-    if (!state.settings.enabled || !running) return;
+    if ((!state.settings.enabled && !state.settings.autoBrowserClues) || !running) return;
     let pollPending = false; let schedulePending = false;
     const sample = () => {
       if (pollPending) return;
@@ -156,6 +201,7 @@ export const createActivityManager = ({ repository, stateFilePath, getIdleSecond
             lastNightlyDate: typeof parsed.lastNightlyDate === 'string' ? parsed.lastNightlyDate : null };
         } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') console.error('自动化设置读取失败，使用默认设置', error); }
         state.lastAutoSummaryAt ??= new Date().toISOString();
+        nextBrowserSyncAt = 0; lastBrowserAttemptAt = 0; browserSyncDate = ''; browserWaiting = false;
         running = true; paused = false;
         applyLoginItem(state.settings); await save();
       });
@@ -166,14 +212,16 @@ export const createActivityManager = ({ repository, stateFilePath, getIdleSecond
       await serial(save);
     },
     pause,
-    resume() { paused = false; background(() => serial(poll)); },
+    resume() { paused = false; background(() => serial(async () => { await poll(); await checkScheduled(); })); },
     getSettings() { return { ...state.settings, excludedProcesses: [...(state.settings.excludedProcesses ?? [])] }; },
+    getClueAutomationStatus() { return { ...clueStatus, warnings: [...clueStatus.warnings] }; },
     async updateSettings(input) {
-      generation += 1; changesPending++; close(); clearTimers();
+      generation += 1; changesPending++; nextBrowserSyncAt = 0; close(); clearTimers();
       return serial(async () => {
         try {
           const settings = normalizeSettings(input);
           if (settings.enabled && !state.settings.enabled) state.lastAutoSummaryAt = new Date().toISOString();
+          if (settings.retentionDays !== state.settings.retentionDays) lastPrunedDate = '';
           applyLoginItem(settings); state.settings = settings;
           await save(); return { ...state.settings };
         } finally { changesPending--; arm(); }

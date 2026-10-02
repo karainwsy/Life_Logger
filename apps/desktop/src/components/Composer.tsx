@@ -5,12 +5,14 @@ import { api, errorText, type Notify } from '../api';
 import { Icon } from './Icon';
 const DRAFT_KEY = 'life-logger.draft.v1';
 type Phase = 'idle' | 'starting' | 'recording' | 'transcribing' | 'saving';
-const readDraft = (): { content: string; source: LogSourceType } => {
-  try { const saved = JSON.parse(localStorage.getItem(DRAFT_KEY) ?? '{}'); return { content: typeof saved.content === 'string' ? saved.content : '', source: saved.source === 'voice' ? 'voice' : 'manual' }; }
-  catch { return { content: '', source: 'manual' }; }
+const readDraft = (): { draft: { content: string; source: LogSourceType }; error: boolean } => {
+  try { const saved = JSON.parse(localStorage.getItem(DRAFT_KEY) ?? '{}'); return { draft: { content: typeof saved.content === 'string' ? saved.content : '', source: saved.source === 'voice' ? 'voice' : 'manual' }, error: false }; }
+  catch { return { draft: { content: '', source: 'manual' }, error: true }; }
 };
 export function Composer({ notify, onSaved }: { notify: Notify; onSaved: () => void }) {
-  const [draft, setDraft] = useState(readDraft);
+  const [initial] = useState(readDraft);
+  const [draft, setDraft] = useState(initial.draft);
+  const [draftError, setDraftError] = useState<'read' | 'write' | ''>(initial.error ? 'read' : '');
   const [phase, setPhase] = useState<Phase>('idle');
   const [seconds, setSeconds] = useState(0);
   const phaseRef = useRef<Phase>('idle'); const recorder = useRef<AudioRecorder | null>(null);
@@ -18,7 +20,8 @@ export function Composer({ notify, onSaved }: { notify: Notify; onSaved: () => v
   const input = useRef<HTMLTextAreaElement>(null); const mounted = useRef(true);
   const changePhase = (value: Phase) => { phaseRef.current = value; if (mounted.current) setPhase(value); };
   useEffect(() => {
-    try { localStorage.setItem(DRAFT_KEY, JSON.stringify(draft)); } catch { /* Saving to the database remains available if draft storage is full. */ }
+    if (initial.error && draft === initial.draft) return;
+    try { localStorage.setItem(DRAFT_KEY, JSON.stringify(draft)); setDraftError(''); } catch { setDraftError('write'); }
   }, [draft]);
   useEffect(() => {
     mounted.current = true;
@@ -64,9 +67,12 @@ export function Composer({ notify, onSaved }: { notify: Notify; onSaved: () => v
   };
   const save = async () => {
     if (phaseRef.current !== 'idle' || !draft.content.trim()) return;
+    const savedDraft = JSON.stringify(draft);
     changePhase('saving');
     try {
       await api.createLog({ content: draft.content.trim(), sourceType: draft.source });
+      try { if (localStorage.getItem(DRAFT_KEY) === savedDraft) localStorage.removeItem(DRAFT_KEY); }
+      catch { notify('日志已保存，但本机草稿未能清除。', 'error'); }
       if (!mounted.current) return;
       setDraft({ content: '', source: 'manual' }); notify('已记下这一刻'); onSaved();
     } catch (error) { if (mounted.current) notify(errorText(error), 'error'); }
@@ -83,10 +89,11 @@ export function Composer({ notify, onSaved }: { notify: Notify; onSaved: () => v
   return <section className={`composer ${active ? 'composer-active' : ''}`} aria-label="新日志">
     <div className="composer-heading"><span className="small-icon"><Icon name="edit" size={17} /></span><span>记录此刻</span><span className="composer-date">{new Date().toLocaleDateString('zh-CN', { month: 'long', day: 'numeric', weekday: 'long' })}</span></div>
     <textarea ref={input} aria-label="日志内容" placeholder="今天发生了什么？一个想法，一件小事，都可以记在这里。" value={draft.content} maxLength={100000} disabled={phase === 'saving'} onChange={event => setDraft(current => ({ ...current, content: event.target.value }))} />
+    {draftError && <p className="notice warning" role="alert">{draftError === 'read' ? '本机草稿读取失败。' : '草稿未能保留在本机。'}当前内容请先保存为日志，避免丢失。</p>}
     <div className="composer-bottom">
       <div className="recording-tools">
         <button className={`voice-control ${phase === 'recording' ? 'recording' : ''}`} onClick={() => void (phase === 'recording' ? finishRecording() : startRecording())} disabled={phase === 'starting' || phase === 'transcribing' || phase === 'saving'} aria-label={phase === 'recording' ? '停止录音并转写' : '开始语音记录'}><Icon name={phase === 'recording' ? 'stop' : 'mic'} size={19} /><span>{phase === 'recording' ? `${String(Math.floor(seconds / 60)).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}` : '语音'}</span></button>
-        {active ? <><span className="recording-status" role="status">{phase === 'starting' ? '等待麦克风…' : phase === 'transcribing' ? '正在本地转写…' : '录音中 · 最长 5 分钟'}</span><button className="text-button" onClick={() => void cancelAudio()}>取消</button></> : <span className="draft-hint">{draft.content ? '草稿自动保留' : 'Ctrl + Enter 保存'}</span>}
+        {active ? <><span className="recording-status" role="status">{phase === 'starting' ? '等待麦克风…' : phase === 'transcribing' ? '正在本地转写…' : '录音中 · 最长 5 分钟'}</span><button className="text-button" onClick={() => void cancelAudio()}>取消</button></> : <span className="draft-hint">{draftError === 'read' ? '草稿读取失败' : draftError === 'write' ? '草稿未能保留' : draft.content ? '草稿自动保留' : 'Ctrl + Enter 保存'}</span>}
       </div>
       <button className="primary-button" onClick={() => void save()} disabled={phase !== 'idle' || !draft.content.trim()}>{phase === 'saving' ? '保存中…' : '记下来'}<Icon name="arrow" size={17} /></button>
     </div>

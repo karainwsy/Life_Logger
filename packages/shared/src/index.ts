@@ -1,4 +1,5 @@
 export const appName = 'Life Logger';
+export { buildDailyReview, composeDailyReview, recommendDailyReviewGroup } from './daily-review';
 
 /** Keep only a web address's origin and path; never persist credentials or query tokens. */
 export const sanitizeClueUrl = (value: string): string => {

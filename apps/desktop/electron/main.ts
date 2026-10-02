@@ -1,6 +1,7 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, powerMonitor, Tray } from 'electron';
 import type { IpcMainInvokeEvent } from 'electron';
 import fs from 'node:fs/promises';
+import { writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -11,7 +12,7 @@ import { parseBackup, serializeBackup } from '@life-logger/sync';
 import type { ActivitySettings, BrowserHistorySummary, CreateLogInput, DeleteLogInput, GenerateActivitySummaryInput, GenerateBrowserHistorySummaryInput, LogDateRange, SearchLogsInput, TranscribeAudioInput, TranscribeAudioResult, UpdateLogInput } from '@life-logger/domain';
 import { createActivityManager, type ActivityManager } from './activity-manager';
 import { dateKeyRange } from '@life-logger/shared';
-import type { BrowserVisitsResult, SearchCluesInput, UpdateClueInput } from '@life-logger/domain';
+import type { BrowserVisitsResult, SearchCluesInput, UpdateClueInput, SaveDailyReviewInput } from '@life-logger/domain';
 
 app.setName('life-logger');
 const isDev = process.argv.includes('--dev');
@@ -31,6 +32,7 @@ let historyBusy = false;
 let cluesBusy = false;
 let settingsRevision = 0;
 let backupBusy = false;
+let reviewExportBusy = false;
 const workers = new Set<Worker>();
 
 const notify = () => {
@@ -62,6 +64,17 @@ const runWorker = <T>(workerData: unknown, timeout = 120_000, signal?: AbortSign
   worker.once('error', error => finish(error));
   worker.once('exit', code => { if (!settled) finish(new Error(`后台任务意外结束（${code}）`)); });
 });
+const readBrowserClues = async (date: string, excludedProcesses: string[], skipBusy = false): Promise<BrowserVisitsResult | null> => {
+  if (cluesBusy) { if (skipBusy) return null; throw new Error('网页线索正在读取'); }
+  const range = dateKeyRange(date);
+  if (Date.parse(range.start) > Date.now()) throw new Error('不能读取未来的网页访问');
+  cluesBusy = true;
+  try {
+    const result = await runWorker<BrowserVisitsResult>({ task: 'clues', input: { ...range, excludedProcesses } });
+    if (quitting) throw new Error('应用正在退出');
+    return result;
+  } finally { cluesBusy = false; }
+};
 const transcribe = async (input: TranscribeAudioInput) => {
   if (voiceBusy) throw new Error('已有录音正在转写');
   if (!(input?.wavData instanceof ArrayBuffer) || input.wavData.byteLength < 44 || input.wavData.byteLength > 20 * 1024 * 1024) throw new Error('录音文件无效或过长');
@@ -95,21 +108,29 @@ const registerIpc = () => {
     finally { historyBusy = false; }
   });
   handle('activity:getSettings', () => activity.getSettings());
+  handle('clues:getAutomationStatus', () => activity.getClueAutomationStatus());
   handle<SearchCluesInput>('clues:search', input => repository.searchClues(input));
+  handle<{ date: string }>('review:get', input => repository.getDailyReview(input));
+  handle<SaveDailyReviewInput>('review:save', input => repository.saveDailyReview(input));
+  handle<SaveDailyReviewInput>('review:export', async input => {
+    dateKeyRange(input?.date);
+    if (typeof input.content !== 'string' || !input.content.trim() || input.content.length > 100_000) throw new Error('回顾内容不能为空，且不能超过 10 万字');
+    if (reviewExportBusy) throw new Error('请先完成当前导出');
+    reviewExportBusy = true;
+    try {
+      const result = await dialog.showSaveDialog(window!, { title: '导出一天回顾', defaultPath: path.join(app.getPath('documents'), `life-logger-review-${input.date}.md`), filters: [{ name: 'Markdown 文档', extensions: ['md'] }] });
+      if (result.canceled || !result.filePath) return null;
+      await fs.writeFile(result.filePath, input.content.trim() + '\n', 'utf8');
+      return { filePath: result.filePath };
+    } finally { reviewExportBusy = false; }
+  });
   handle<UpdateClueInput>('clues:update', input => repository.updateClue(input));
   handle<{ id: number }>('clues:save', input => repository.saveClueAsLog(input));
   handle<{ date: string }>('clues:importBrowser', async input => {
-    if (cluesBusy) throw new Error('网页线索正在读取');
-    const range = dateKeyRange(input?.date);
-    if (Date.parse(range.start) > Date.now()) throw new Error('不能读取未来的网页访问');
-    cluesBusy = true;
     const revision = settingsRevision;
-    try {
-      const result = await runWorker<BrowserVisitsResult>({ task: 'clues', input: { ...range, excludedProcesses: activity.getSettings().excludedProcesses } });
-      if (quitting) throw new Error('应用正在退出');
-      if (revision !== settingsRevision) throw new Error('采集设置已变化，请重新补充网页线索');
-      return { added: repository.importBrowserVisits(result.visits), scanned: result.visits.length, warnings: result.warnings, truncated: result.truncated };
-    } finally { cluesBusy = false; }
+    const result = (await readBrowserClues(input?.date, activity.getSettings().excludedProcesses ?? []))!;
+    if (revision !== settingsRevision) throw new Error('采集设置已变化，请重新补充网页线索');
+    return { added: repository.importBrowserVisits(result.visits), scanned: result.visits.length, warnings: result.warnings, truncated: result.truncated };
   });
   handle<ActivitySettings>('activity:updateSettings', input => {
     if (!input || typeof input !== 'object') throw new Error('设置格式无效');
@@ -141,7 +162,7 @@ const registerIpc = () => {
       const folder = path.join(app.getPath('userData'), 'recovery');
       await fs.mkdir(folder, { recursive: true });
       const snapshotPath = path.join(folder, `before-restore-${Date.now()}-${randomUUID()}.json`);
-      await fs.writeFile(snapshotPath, serializeBackup(repository.getAllLogs()), 'utf8');
+      writeFileSync(snapshotPath, serializeBackup(repository.getAllLogs()), { encoding: 'utf8', flag: 'wx' });
       return { importedCount: repository.replaceAllLogs(backup.logs), snapshotPath };
     } finally { backupBusy = false; }
   });
@@ -153,6 +174,7 @@ else {
   app.whenReady().then(async () => {
     repository = createLogRepository(path.join(app.getPath('userData'), 'life-logger.db'), notify);
     activity = createActivityManager({ repository, stateFilePath: path.join(app.getPath('userData'), 'activity-settings.json'),
+      readBrowserClues: (date, excludedProcesses) => readBrowserClues(date, excludedProcesses, true),
       getIdleSeconds: () => powerMonitor.getSystemIdleTime(),
       applyLoginItem: settings => { if (app.isPackaged) app.setLoginItemSettings({ openAtLogin: settings.openAtLogin, args: settings.startMinimized ? ['--hidden'] : [] }); }
     });
